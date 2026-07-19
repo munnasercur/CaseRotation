@@ -3,7 +3,7 @@ const express = require("express");
 const line = require("@line/bot-sdk");
 const cron = require("node-cron");
 
-const { detectCase } = require("./lib/caseDetector");
+const { detectCases } = require("./lib/caseDetector");
 const { whoIsNext } = require("./lib/rotation");
 const sheets = require("./lib/sheets");
 
@@ -64,7 +64,7 @@ async function handleEvent(event) {
           "• พิมพ์ 'เตียง ชื่อ' เช่น '3 มาโนชญ' เพื่อลงเคสใหม่ → มอบหมายอัตโนมัติตามคิว\n" +
           "• /status → ดูคิวปัจจุบันและเคสล่าสุด\n" +
           "• /undo → ลบเคสล่าสุด (เผื่อลงผิด)\n" +
-          "• /summary → สรุปเคสของแต่ละคนใน 24 ชม.ที่ผ่านมา"
+          "• /summary → สรุปเคสของแต่ละคนใน 3 วันที่ผ่านมา"
       ),
     ]);
   }
@@ -101,27 +101,34 @@ async function handleEvent(event) {
     return reply(event.replyToken, [textMessage(message)]);
   }
 
-  // Otherwise, check if this looks like a new case.
-  const detected = detectCase(text);
-  if (!detected) return;
+  // Otherwise, check if this looks like one or more new cases.
+  const detectedCases = detectCases(text);
+  if (detectedCases.length === 0) return;
 
-  const count = await sheets.getCaseCount();
-  const assignedTo = whoIsNext(count);
+  let count = await sheets.getCaseCount();
+  const assignments = [];
 
-  await sheets.appendCase({
-    bedNumber: detected.bedNumber,
-    patientName: detected.patientName,
-    assignedTo,
-    rawText: detected.rawText,
-  });
+  // Assign and log each case in order, so a message with several cases
+  // correctly hands them to consecutive people in the rotation.
+  for (const c of detectedCases) {
+    const assignedTo = whoIsNext(count);
+    await sheets.appendCase({
+      bedNumber: c.bedNumber,
+      patientName: c.patientName,
+      assignedTo,
+      rawText: c.rawText,
+    });
+    assignments.push({ ...c, assignedTo });
+    count++;
+  }
 
-  const upcoming = whoIsNext(count + 1);
+  const upcoming = whoIsNext(count);
+  const lines = assignments
+    .map((a) => `🆕 เตียง ${a.bedNumber} ${a.patientName} → ${a.assignedTo}`)
+    .join("\n");
+
   return reply(event.replyToken, [
-    textMessage(
-      `🆕 เตียง ${detected.bedNumber} ${detected.patientName}\n` +
-        `มอบหมายให้: ${assignedTo}\n` +
-        `คิวถัดไป: ${upcoming}`
-    ),
+    textMessage(`${lines}\n\nคิวถัดไป: ${upcoming}`),
   ]);
 }
 
@@ -133,10 +140,10 @@ async function reply(replyToken, messages) {
   return client.replyMessage({ replyToken, messages });
 }
 
-async function buildSummaryMessage() {
-  const recent = await sheets.getRecentCases(24);
+async function buildSummaryMessage(hours = 72) {
+  const recent = await sheets.getRecentCases(hours);
   if (recent.length === 0) {
-    return "ยังไม่มีเคสใหม่ในช่วง 24 ชั่วโมงที่ผ่านมาครับ";
+    return "ยังไม่มีเคสใหม่ในช่วง 3 วันที่ผ่านมาครับ";
   }
   const byPerson = {};
   for (const c of recent) {
@@ -146,12 +153,12 @@ async function buildSummaryMessage() {
   const lines = Object.entries(byPerson).map(
     ([person, items]) => `${person} (${items.length}):\n  ${items.join("\n  ")}`
   );
-  return `สรุปเคส 24 ชม.ที่ผ่านมา:\n\n${lines.join("\n\n")}`;
+  return `สรุปเคส 3 วันที่ผ่านมา:\n\n${lines.join("\n\n")}`;
 }
 
-// ---- Daily automatic summary, 8:00 AM Bangkok time ----
+// ---- Daily automatic summary, 6:00 AM Bangkok time ----
 cron.schedule(
-  "0 8 * * *",
+  "0 6 * * *",
   async () => {
     try {
       const groupId = await sheets.getConfig("groupId");
