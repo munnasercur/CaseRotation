@@ -174,3 +174,28 @@ cron.schedule(
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`KhunThong-lite listening on port ${port}`));
+
+// ---- Keep-alive self-ping ----
+// Render's free tier spins the service down after ~15 minutes with no
+// incoming HTTP requests. That breaks two things: node-cron never fires
+// (the whole process is asleep at 6 AM), and the *first* message after a
+// quiet stretch times out while the instance cold-starts, so the reply
+// silently fails and you have to send it again. Pinging our own public
+// URL every 10 minutes creates genuine inbound traffic, so Render never
+// sees the service go idle and never spins it down.
+// RENDER_EXTERNAL_URL is set automatically by Render for web services —
+// no manual configuration needed.
+const SELF_URL = process.env.RENDER_EXTERNAL_URL;
+if (SELF_URL) {
+  cron.schedule("*/10 * * * *", () => {
+    fetch(SELF_URL).catch((err) =>
+      console.error("Self-ping failed:", err.message)
+    );
+  });
+} else {
+  console.warn(
+    "RENDER_EXTERNAL_URL not set — skipping self-ping. If deployed on " +
+      "Render this should be set automatically; on other hosts this " +
+      "keep-alive trick isn't needed/applicable."
+  );
+}
