@@ -21,10 +21,10 @@ const config = {
 // every deploy, so small fixes don't spam the group.
 const ANNOUNCEMENT_MESSAGE =
   "📢 อัปเดตขุนทองเวอร์ชั่นเล็ก!\n\n" +
-  "รอบเวรใหม่: Focus → Munna → Namkhing → Bifern → Peem → Jennie (วนซ้ำ)\n\n" +
-  "อื่นๆ:\n" +
-  "• แก้บั๊ก /todaycase ที่ไม่ตอบกลับ ตอนนี้ใช้งานได้แล้ว\n" +
-  "• คำสั่งใหม่สำหรับตั้งคิว (แอดมิน): /setnext ตามด้วยชื่อ เช่น /setnext jennie\n\n" +
+  "รอบเวรใหม่: Peem → Jennie → Munna (วนซ้ำ) เริ่มคิวแรกที่ Peem\n\n" +
+  "การเปลี่ยนแปลงสำคัญ:\n" +
+  "• ตอนนี้ก่อนลงเคส/จำหน่าย/มอบหมายเอง ต้องพิมพ์ /activate ก่อนเสมอ (บอทจะตอบ 'พร้อมแล้วครับ') แล้วพิมพ์คำสั่งนั้นในข้อความถัดไปทันที — ใช้ได้ครั้งเดียวต่อ /activate หนึ่งครั้ง เพื่อกันบอทอ่านข้อความแชทปกติที่ขึ้นต้นด้วยตัวเลขผิดพลาด (เช่น '3 คนแล้วที่ยังไม่ได้กินข้าว')\n" +
+  "• คำสั่งอื่นๆ อย่าง /status /allcase /todaycase /undo /setnext ยังใช้ได้ปกติ ไม่ต้อง /activate ก่อน\n\n" +
   "พิมพ์ /help เพื่อดูคำสั่งทั้งหมดอีกครั้งครับ";
 
 const client = new line.messagingApi.MessagingApiClient({
@@ -59,6 +59,29 @@ const app = express();
 
 app.get("/", (_req, res) => res.send("KhunThong-lite is running."));
 
+// ---- One-shot activation gate ----
+// Ordinary chat messages that happen to start with a number (e.g. "3
+// อยากกินข้าว") could still get misread as a case. As an extra safety
+// net on top of the strict parsing, number-starting prompts (new case,
+// discharge, manual assignment) now require the group to type /activate
+// immediately before each one. It's a one-shot token: it's consumed by
+// the very next message regardless of whether that message turns out to
+// be a valid prompt, so it can't stay silently "armed" and catch a later
+// unrelated message. Named "/xxx" commands (like /status) never require
+// this, since they're unambiguous exact matches, not number-starting
+// text. This is in-memory only (not persisted to the Sheet) since it's
+// meant to be a short-lived, per-message token, not durable state.
+const activatedSources = new Set();
+
+function sourceKey(event) {
+  const s = event.source;
+  if (!s) return null;
+  if (s.type === "group") return `group:${s.groupId}`;
+  if (s.type === "room") return `room:${s.roomId}`;
+  if (s.type === "user") return `user:${s.userId}`;
+  return null;
+}
+
 app.post(
   "/webhook",
   line.middleware(config),
@@ -86,7 +109,7 @@ async function handleEvent(event) {
     return reply(event.replyToken, [
       textMessage(
         "สวัสดีครับ ผมขุนทองเวอร์ชั่นเล็ก 🐦\n" +
-          "พิมพ์เคสใหม่ในรูปแบบ 'เตียง ชื่อ' เช่น '3 มาโนชญ' แล้วผมจะมอบหมายให้อัตโนมัติ\n" +
+          "ก่อนลงเคส/จำหน่าย/มอบหมายเอง ต้องพิมพ์ /activate ก่อนเสมอ (กันบอทอ่านข้อความอื่นที่ขึ้นต้นด้วยตัวเลขผิดพลาด) แล้วพิมพ์เคสในข้อความถัดไป เช่น '3 มาโนชญ'\n" +
           "คำสั่ง: /status /allcase /todaycase /undo /help"
       ),
     ]);
@@ -96,18 +119,34 @@ async function handleEvent(event) {
 
   const text = event.message.text.trim();
 
+  if (text === "/activate") {
+    const key = sourceKey(event);
+    if (key) activatedSources.add(key);
+    return reply(event.replyToken, [textMessage("พร้อมแล้วครับ")]);
+  }
+
+  // Consume the one-shot activation token now, regardless of what this
+  // message turns out to be — see comment above activatedSources.
+  const key = sourceKey(event);
+  let isActivated = false;
+  if (key && activatedSources.has(key)) {
+    isActivated = true;
+    activatedSources.delete(key);
+  }
+
   if (text === "/help") {
     return reply(event.replyToken, [
       textMessage(
         "วิธีใช้:\n" +
+          "• ก่อนพิมพ์เคส/จำหน่าย/มอบหมายเอง ต้องพิมพ์ /activate ก่อนเสมอ (บอทจะตอบ 'พร้อมแล้วครับ') แล้วพิมพ์คำสั่งนั้นในข้อความถัดไปทันที — ใช้ได้ครั้งเดียวต่อหนึ่ง /activate กันบอทอ่านข้อความอื่นที่ขึ้นต้นด้วยตัวเลขผิดพลาด\n" +
           "• พิมพ์ 'เตียง ชื่อ' เช่น '3 มาโนชญ' เพื่อลงเคสใหม่ → มอบหมายอัตโนมัติตามคิว (พิมพ์ต่อกันได้หลายเคส เช่น '3 มาโนชญ 5 สมศรี')\n" +
           "• 'เตียง ชื่อ d/c' เช่น '3 มาโนชญ d/c' → จำหน่ายผู้ป่วยเตียงนั้น (ต้องระบุชื่อด้วยเสมอ กันจำหน่ายผิดคนเวลาเตียงถูกใช้ซ้ำ) พิมพ์ต่อกันได้ เช่น '3 มาโนชญ d/c 5 สมศรี d/c' — ไม่กระทบคิว\n" +
           "• 'เตียง ชื่อ คนรับ' เช่น '8 สมศรี jennie' → มอบหมายเคสนี้ให้คนที่ระบุเอง (คิวจะขยับไปคนถัดจากคนนั้น)\n" +
-          "• /allcase หรือ /summary → ดูเคส Active ทั้งหมด แยกตามเจ้าของเคส (ไม่รวมที่จำหน่ายแล้ว ไม่จำกัดวัน)\n" +
-          "• /todaycase → ดูเคสที่รับวันนี้ทั้งหมด แยกตามเจ้าของเคส\n" +
-          "• /status → ดูคิวถัดไปและเคสล่าสุด\n" +
-          "• /undo → ลบเคสล่าสุด (เผื่อลงผิด) และคืนคิวกลับ\n" +
-          "• /setnext ตามด้วยชื่อ เช่น '/setnext jennie' → ตั้งคิวถัดไปเอง (สำหรับรีเซ็ตคิวตอนเปลี่ยนรอบเวร)\n\n" +
+          "• /allcase หรือ /summary → ดูเคส Active ทั้งหมด แยกตามเจ้าของเคส (ไม่รวมที่จำหน่ายแล้ว ไม่จำกัดวัน) — ไม่ต้อง /activate\n" +
+          "• /todaycase → ดูเคสที่รับวันนี้ทั้งหมด แยกตามเจ้าของเคส — ไม่ต้อง /activate\n" +
+          "• /status → ดูคิวถัดไปและเคสล่าสุด — ไม่ต้อง /activate\n" +
+          "• /undo → ลบเคสล่าสุด (เผื่อลงผิด) และคืนคิวกลับ — ไม่ต้อง /activate\n" +
+          "• /setnext ตามด้วยชื่อ เช่น '/setnext peem' → ตั้งคิวถัดไปเอง (สำหรับรีเซ็ตคิวตอนเปลี่ยนรอบเวร) — ไม่ต้อง /activate\n\n" +
           `รอบเวรตอนนี้: ${ORDER.join(" → ")} → (วนซ้ำ)`
       ),
     ]);
@@ -188,6 +227,10 @@ async function handleEvent(event) {
       textMessage(`ตั้งคิวถัดไปเป็น: ${ORDER[idx]} แล้วครับ`),
     ]);
   }
+
+  // ---- Everything below requires /activate immediately beforehand ----
+  // (see comment above activatedSources for why).
+  if (!isActivated) return;
 
   // ---- Discharge: "3 มาโนชญ d/c" (name required) ----
   // Checked before case detection since "d/c" would otherwise look like
